@@ -1,13 +1,13 @@
 # Unhappy path: a before-hook fires a second AASM event on the same thread.
 #
-# This is real. A payment's before hook might call `order.ship!`, or a
-# ledger's before hook might archive an old entry. The inner event runs
-# inside the outer event's call stack — specifically BEFORE aasm_write_state
+# This is real. A job's before hook might call `service.deactivate!`, or an
+# approval workflow's before hook might archive an old record. The inner event
+# runs inside the outer event's call stack — specifically BEFORE aasm_write_state
 # runs for the outer event.
 #
-# The bug (guard_order.rb ensure):
+# The bug (ensure block):
 #
-#   Thread.current[:aasm_current_event] = :pay   # outer sets it
+#   Thread.current[:aasm_current_event] = :complete  # outer sets it
 #   super                                              # inner event fires here
 #     → inner sets it to :fail
 #     → inner's ensure resets it to nil               # ← outer context wiped
@@ -16,43 +16,43 @@
 # The fix: save/restore instead of reset-to-nil in ensure.
 
 RSpec.describe "Unhappy path: re-entrant events in callbacks" do
-  let(:outer) { Payment.create!(amount_cents: 1000) }
-  let(:inner) { Payment.create!(amount_cents: 1000) }
+  let(:outer) { Job.create!(work_units: 1000) }
+  let(:inner) { Job.create!(work_units: 1000) }
 
-  after { Payment.before_pay_probe = nil }
+  after { Job.before_complete_probe = nil }
 
   # ── Inner event succeeds ─────────────────────────────────────────────────
 
   describe "inner event fires inside the before hook of an outer event" do
     before do
-      # :pay's before hook fires :fail on a different Payment record.
+      # :complete's before hook fires :fail on a different Job record.
       # :fail has no guards, so it always succeeds immediately.
       # The inner event's ensure block runs before the outer's aasm_write_state.
-      Payment.before_pay_probe = ->(_) { inner.fail! }
+      Job.before_complete_probe = ->(_) { inner.fail! }
     end
 
-    it "logs the correct event name ('pay') for the outer transition" do
-      outer.pay!
+    it "logs the correct event name ('complete') for the outer transition" do
+      outer.complete!
 
-      log = PaymentTransition.find_by(payment_id: outer.id)
-      expect(log.event).to eq('pay'),
+      log = JobTransition.find_by(job_id: outer.id)
+      expect(log.event).to eq('complete'),
         "Outer event logged as #{log.event.inspect}.\n" \
         "The inner event's ensure reset :aasm_current_event to nil before\n" \
         "the outer aasm_write_state ran. Fix: save/restore, not reset."
     end
 
     it "logs the correct event name ('fail') for the inner transition" do
-      outer.pay!
+      outer.complete!
 
-      log = PaymentTransition.find_by(payment_id: inner.id)
+      log = JobTransition.find_by(job_id: inner.id)
       expect(log.event).to eq('fail')
     end
 
-    it "creates exactly one transition record per payment" do
-      outer.pay!
+    it "creates exactly one transition record per job" do
+      outer.complete!
 
-      expect(PaymentTransition.where(payment_id: outer.id).count).to eq(1)
-      expect(PaymentTransition.where(payment_id: inner.id).count).to eq(1)
+      expect(JobTransition.where(job_id: outer.id).count).to eq(1)
+      expect(JobTransition.where(job_id: inner.id).count).to eq(1)
     end
   end
 
@@ -63,15 +63,15 @@ RSpec.describe "Unhappy path: re-entrant events in callbacks" do
 
   describe "inner guard fails inside the before hook of an outer event" do
     before do
-      unchargeable = Payment.create!(amount_cents: 0)
-      Payment.before_pay_probe = ->(_) { unchargeable.pay rescue nil }
+      ineligible = Job.create!(work_units: 0)
+      Job.before_complete_probe = ->(_) { ineligible.complete rescue nil }
     end
 
     it "does not corrupt the outer event name when the inner guard fails" do
-      outer.pay!
+      outer.complete!
 
-      log = PaymentTransition.find_by(payment_id: outer.id)
-      expect(log.event).to eq('pay'),
+      log = JobTransition.find_by(job_id: outer.id)
+      expect(log.event).to eq('complete'),
         "Outer event logged as #{log.event.inspect}.\n" \
         "When the inner guard fails we early-return WITHOUT setting the\n" \
         "thread-local, but ensure still resets it to nil — clearing the\n" \
@@ -79,12 +79,12 @@ RSpec.describe "Unhappy path: re-entrant events in callbacks" do
     end
 
     it "does not create a transition record for the failed inner attempt" do
-      unchargeable = Payment.create!(amount_cents: 0)
-      Payment.before_pay_probe = ->(_) { unchargeable.pay rescue nil }
+      ineligible = Job.create!(work_units: 0)
+      Job.before_complete_probe = ->(_) { ineligible.complete rescue nil }
 
-      outer.pay!
+      outer.complete!
 
-      expect(PaymentTransition.where(payment_id: unchargeable.id).count).to eq(0)
+      expect(JobTransition.where(job_id: ineligible.id).count).to eq(0)
     end
   end
 end

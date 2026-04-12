@@ -19,35 +19,35 @@ RSpec.describe "Contract: guards" do
   # ── Failing guard ──────────────────────────────────────────────────────────
 
   describe "when a guard returns false" do
-    subject(:payment) { Payment.create!(amount_cents: 0) }   # not chargeable
+    subject(:job) { Job.create!(work_units: 0) }   # not eligible
 
     it "raises AASM::InvalidTransition on the bang method" do
-      expect { payment.pay! }.to raise_error(AASM::InvalidTransition)
+      expect { job.complete! }.to raise_error(AASM::InvalidTransition)
     end
 
     it "returns false (not raises) on the non-bang method" do
-      expect(payment.pay).to be false
+      expect(job.complete).to be false
     end
 
     it "leaves the state column unchanged" do
-      payment.pay rescue nil
-      expect(payment.reload.status).to eq('pending')
+      job.complete rescue nil
+      expect(job.reload.status).to eq('pending')
     end
 
     it "does not run the before hook" do
       before_ran = false
-      Payment.before_pay_probe = ->(_) { before_ran = true }
+      Job.before_complete_probe = ->(_) { before_ran = true }
 
-      payment.pay rescue nil
+      job.complete rescue nil
 
       expect(before_ran).to be false
     end
 
     it "does not fire after_commit" do
       fired = false
-      Payment.on_paid_probe = ->(_) { fired = true }
+      Job.on_completed_probe = ->(_) { fired = true }
 
-      payment.pay rescue nil
+      job.complete rescue nil
 
       expect(fired).to be false
     end
@@ -56,11 +56,11 @@ RSpec.describe "Contract: guards" do
   # ── Passing guard ──────────────────────────────────────────────────────────
 
   describe "when a guard returns true" do
-    subject(:payment) { Payment.create!(amount_cents: 1000) }
+    subject(:job) { Job.create!(work_units: 1000) }
 
     it "allows the transition" do
-      expect { payment.pay! }.not_to raise_error
-      expect(payment.status).to eq('paid')
+      expect { job.complete! }.not_to raise_error
+      expect(job.status).to eq('completed')
     end
   end
 
@@ -76,27 +76,27 @@ RSpec.describe "Contract: guards" do
   # config.  This spec tests the freshness guarantee only.
 
   describe "guards run on fresh database state (not stale in-memory)" do
-    subject(:payment) { Payment.create!(amount_cents: 0) }   # stale: not chargeable
+    subject(:job) { Job.create!(work_units: 0) }   # stale: not eligible
 
     it "reloads the record before evaluating guards" do
       # Update the DB behind the in-memory object's back
-      Payment.where(id: payment.id).update_all(amount_cents: 1000)
+      Job.where(id: job.id).update_all(work_units: 1000)
 
-      # In memory: amount_cents is still 0 — guard would fail on stale data
-      expect(payment.amount_cents).to eq(0)
+      # In memory: work_units is still 0 — guard would fail on stale data
+      expect(job.work_units).to eq(0)
 
       # Correct behavior: reload before guards → reads 1000 → passes
-      expect { payment.pay! }.not_to raise_error,
+      expect { job.complete! }.not_to raise_error,
         "Guard evaluated stale in-memory data instead of reloading from DB."
     end
 
     it "reflects the current DB state in guard evaluation, not the object's memory" do
-      Payment.where(id: payment.id).update_all(amount_cents: 1000)
+      Job.where(id: job.id).update_all(work_units: 1000)
 
       # bang method — triggers reload + persist
-      payment.pay!
+      job.complete!
 
-      expect(payment.reload.status).to eq('paid')
+      expect(job.reload.status).to eq('completed')
     end
   end
 
@@ -106,16 +106,16 @@ RSpec.describe "Contract: guards" do
   # Guards must be safe to call multiple times with no observable effect.
 
   describe "guards are idempotent (no side effects)" do
-    subject(:payment) { Payment.create!(amount_cents: 1000) }
+    subject(:job) { Job.create!(work_units: 1000) }
 
-    it "can be checked via may_pay? without changing state" do
-      expect(payment.may_pay?).to be true
-      expect(payment.reload.status).to eq('pending')
+    it "can be checked via may_complete? without changing state" do
+      expect(job.may_complete?).to be true
+      expect(job.reload.status).to eq('pending')
     end
 
     it "can be called multiple times without consequence" do
-      3.times { payment.may_pay? }
-      expect(payment.reload.status).to eq('pending')
+      3.times { job.may_complete? }
+      expect(job.reload.status).to eq('pending')
     end
   end
 end

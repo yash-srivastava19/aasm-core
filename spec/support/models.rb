@@ -1,40 +1,40 @@
 require 'aasm'
 
 # ── Transition log ────────────────────────────────────────────────────────────
-class PaymentTransition < ActiveRecord::Base
-  belongs_to :payment
+class JobTransition < ActiveRecord::Base
+  belongs_to :job
 end
 
-# ── Payment ───────────────────────────────────────────────────────────────────
-class Payment < ActiveRecord::Base
+# ── Job ───────────────────────────────────────────────────────────────────────
+class Job < ActiveRecord::Base
   include AASM
 
   # Test probes — set in specs, cleared in before(:each)
-  cattr_accessor :on_paid_probe
-  cattr_accessor :before_pay_probe
+  cattr_accessor :on_completed_probe
+  cattr_accessor :before_complete_probe
 
   aasm column: :status do
-    state :pending,  initial: true
-    state :paid
+    state :pending,   initial: true
+    state :completed
     state :failed
-    state :refunded
+    state :cancelled
 
-    event :pay do
-      before { self.class.before_pay_probe&.call(self) }
-      transitions from: :pending, to: :paid, guard: :chargeable?
-      after_commit { self.class.on_paid_probe&.call(self) }
+    event :complete do
+      before { self.class.before_complete_probe&.call(self) }
+      transitions from: :pending, to: :completed, guard: :eligible?
+      after_commit { self.class.on_completed_probe&.call(self) }
     end
 
     event :fail do
-      transitions from: %i[pending paid], to: :failed
+      transitions from: %i[pending completed], to: :failed
     end
 
-    event :refund do
-      transitions from: :paid, to: :refunded
+    event :cancel do
+      transitions from: :completed, to: :cancelled
     end
   end
 
-  def chargeable?
-    amount_cents > 0
+  def eligible?
+    work_units > 0
   end
 end
