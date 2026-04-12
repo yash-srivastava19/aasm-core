@@ -13,8 +13,22 @@ module AASM
     # When guards pass we call super, which re-evaluates guards and executes
     # the full callback chain.  Guards run twice but must be pure by contract.
     #
+    # Thread-local context (:aasm_core_current_event)
+    # ------------------------------------------------
+    # TransitionLogger reads this to record the event name inside
+    # aasm_write_state (which doesn't receive the event name as a parameter).
+    #
+    # We use SAVE/RESTORE rather than RESET-TO-NIL so that nested calls —
+    # e.g. a before-hook that fires another event — cannot corrupt the outer
+    # event's context.  Saving happens before the guard check so the ensure
+    # block can always restore, even on an early return.
+    #
     module GuardOrder
       def aasm_fire_event(state_machine_name, event_name, options, *args, &block)
+        # Save caller's context BEFORE anything else so the ensure block can
+        # restore it unconditionally, including on early returns.
+        prev_event = Thread.current[:aasm_core_current_event]
+
         # Reload from the DB before evaluating guards so they always see the
         # current row, not whatever happens to be in Ruby's memory.
         # For production race-condition safety, pair with requires_lock: 'FOR UPDATE NOWAIT'
@@ -35,15 +49,13 @@ module AASM
           end
         end
 
-        # Guards passed — mark we are inside a legitimate AASM transition
-        # (BypassGuard reads this to allow aasm_write_attribute through)
-        Thread.current[:aasm_core_transitioning]   = true
-        Thread.current[:aasm_core_current_event]   = event_name
+        Thread.current[:aasm_core_current_event] = event_name
 
         super
       ensure
-        Thread.current[:aasm_core_transitioning]   = false
-        Thread.current[:aasm_core_current_event]   = nil
+        # Restore, not reset — preserves the outer event's context when
+        # this method is called re-entrantly from a callback.
+        Thread.current[:aasm_core_current_event] = prev_event
       end
     end
   end
