@@ -1,5 +1,5 @@
 $LOAD_PATH.unshift File.join(__dir__, '..', 'lib')
-require 'aasm/core'
+require 'aasm'
 
 require_relative 'support/database'
 require_relative 'support/models'

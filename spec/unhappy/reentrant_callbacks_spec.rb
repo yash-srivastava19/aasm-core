@@ -7,7 +7,7 @@
 #
 # The bug (guard_order.rb ensure):
 #
-#   Thread.current[:aasm_core_current_event] = :pay   # outer sets it
+#   Thread.current[:aasm_current_event] = :pay   # outer sets it
 #   super                                              # inner event fires here
 #     → inner sets it to :fail
 #     → inner's ensure resets it to nil               # ← outer context wiped
@@ -37,7 +37,7 @@ RSpec.describe "Unhappy path: re-entrant events in callbacks" do
       log = PaymentTransition.find_by(payment_id: outer.id)
       expect(log.event).to eq('pay'),
         "Outer event logged as #{log.event.inspect}.\n" \
-        "The inner event's ensure reset :aasm_core_current_event to nil before\n" \
+        "The inner event's ensure reset :aasm_current_event to nil before\n" \
         "the outer aasm_write_state ran. Fix: save/restore, not reset."
     end
 
