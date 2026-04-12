@@ -1,20 +1,27 @@
 # Contract: the state column cannot be written outside AASM's machinery
 #
-# Three bypass vectors exist in vanilla AASM:
+# Two bypass vectors are blocked in this fork:
 #
-#   1. payment.status = 'paid'          — direct attribute assignment
-#   2. payment.update!(status: 'paid')  — goes through validations but not AASM guards
-#   3. payment.update_columns(...)      — skips everything: validations, callbacks, AASM
+#   1. payment.status = 'paid'          — direct attribute assignment (blocked)
+#   2. payment.update!(status: 'paid')  — routes through setter (blocked)
 #
-# AASM's built-in `no_direct_assignment: true` only blocks vector 1.
-# Vectors 2 and 3 remain open.  This spec defines what the correct contract is.
+# One vector is intentionally left open as an escape hatch:
+#
+#   3. payment.update_columns(...)      — allowed
+#
+# Rationale for (3): update_columns is already a deliberate, explicit call
+# that the caller uses knowing it skips validations and callbacks. Blocking it
+# creates a painful situation in production incidents when an engineer needs to
+# correct bad state from the console. The setter override (1) protects against
+# accidental code-level assignment. update_columns is for intentional
+# operator-level corrections.
 
 RSpec.describe "Contract: bypass prevention" do
   subject(:payment) { Payment.create!(amount_cents: 1000) }
 
   # ── Vector 1: direct attribute assignment ─────────────────────────────────
   # AASM handles this with no_direct_assignment: true.
-  # The gem must enable it by default — opt-out, not opt-in.
+  # The gem enables it by default — opt-out, not opt-in.
 
   describe "direct assignment" do
     it "raises when the state column is assigned directly" do
@@ -40,7 +47,7 @@ RSpec.describe "Contract: bypass prevention" do
   end
 
   # ── Vector 2: update! ──────────────────────────────────────────────────────
-  # Goes through AR validations.  A model-level validator must reject this.
+  # Goes through AR validations and routes through the setter.
 
   describe "update! with state column" do
     it "raises because update! routes through the setter" do
@@ -54,20 +61,17 @@ RSpec.describe "Contract: bypass prevention" do
     end
   end
 
-  # ── Vector 3: update_columns ──────────────────────────────────────────────
-  # Skips validations AND callbacks — the most dangerous path.
-  # Closing this without a DB-level trigger requires overriding update_columns.
-  # The gem must do this.
+  # ── Vector 3: update_columns — intentional escape hatch ──────────────────
+  # Allowed by design. For production incident recovery from the console.
 
   describe "update_columns with state column" do
-    it "raises an error rather than silently writing state" do
-      expect { payment.update_columns(status: 'paid') }
-        .to raise_error(RuntimeError, /cannot update state column/)
+    it "succeeds — update_columns is an intentional operator escape hatch" do
+      expect { payment.update_columns(status: 'paid') }.not_to raise_error
     end
 
-    it "does not persist the change" do
-      payment.update_columns(status: 'paid') rescue nil
-      expect(payment.reload.status).to eq('pending')
+    it "persists the new state directly (bypasses AASM machinery by design)" do
+      payment.update_columns(status: 'paid')
+      expect(payment.reload.status).to eq('paid')
     end
   end
 

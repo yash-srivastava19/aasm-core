@@ -26,7 +26,6 @@ module Billing
     self.table_name = 'billing_invoices'
 
     include AASM
-    include AASM::Core
 
     aasm column: :status do
       state :draft,    initial: true
@@ -59,9 +58,9 @@ RSpec.describe "Unhappy path: namespaced models" do
         .to raise_error(AASM::NoDirectAssignmentError)
     end
 
-    it "raises on update_columns with the state column" do
-      expect { invoice.update_columns(status: 'approved') }
-        .to raise_error(RuntimeError, /cannot update state column/)
+    it "allows update_columns as an escape hatch (does not raise)" do
+      expect { invoice.update_columns(status: 'approved') }.not_to raise_error
+      expect(invoice.reload.status).to eq('approved')
     end
   end
 
