@@ -1,6 +1,6 @@
 # aasm-we
 
-A hard fork of [aasm](https://github.com/aasm/aasm) (forked at 5.5.2) that fixes four correctness problems that matter when your state machine guards real money, orders, or compliance workflows.
+A hard fork of [aasm](https://github.com/aasm/aasm) (forked at 5.5.2) that fixes four correctness problems present in the upstream library. The same bugs affect any application using state machines to enforce business rules — whether you're running a job queue, a content moderation pipeline, a booking system, an e-commerce platform, or a SaaS approval workflow.
 
 Drop-in replacement — same DSL, same API. No behaviour changes unless you were relying on the bugs.
 
@@ -13,13 +13,13 @@ Drop-in replacement — same DSL, same API. No behaviour changes unless you were
 **Vanilla aasm** runs `before` callbacks first, then checks guards. If the guard fails, the `before` hook already ran.
 
 ```ruby
-event :charge do
-  before { FeeCalculator.deduct!(self) }   # runs even on guard failure
-  transitions from: :pending, to: :charged, guard: :sufficient_funds?
+event :submit do
+  before { NotificationService.alert_reviewers(self) }  # runs even on guard failure
+  transitions from: :draft, to: :under_review, guard: :has_content?
 end
 ```
 
-In vanilla aasm, `charge!` on an underfunded account deducts a fee and then raises `InvalidTransition`. The money is gone.
+In vanilla aasm, `submit!` on an empty document alerts reviewers and then raises `InvalidTransition`. The notification is gone, reviewers are confused, the document is still in `:draft`.
 
 **This fork** evaluates guards first. If the guard fails, no callbacks run at all. The before-hook is never reached.
 
@@ -30,15 +30,15 @@ In vanilla aasm, `charge!` on an underfunded account deducts a fee and then rais
 **Vanilla aasm** evaluates guards against whatever is in the Ruby object, which may be seconds or minutes old. Two concurrent requests can both pass the guard on the same record.
 
 ```
-Thread A: loads order, amount_cents=1000, guard passes
-Thread B: loads order, amount_cents=1000, guard passes
-Thread A: charges, sets amount_cents=0, saves
-Thread B: charges on stale data — double charge
+Thread A: loads job, capacity=10, guard passes
+Thread B: loads job, capacity=10, guard passes
+Thread A: claims a slot, sets capacity=9, saves
+Thread B: claims on stale data — slot is over-committed
 ```
 
-**This fork** reloads the record from the DB before evaluating guards on bang events (`pay!`). Guards always see committed state.
+**This fork** reloads the record from the DB before evaluating guards on bang events (`complete!`). Guards always see committed state.
 
-> **Side effect:** `pay!` discards unsaved in-memory attribute changes made before the call. Save first, or make the change inside a `before` hook.
+> **Side effect:** `complete!` discards unsaved in-memory attribute changes made before the call. Save first, or make the change inside a `before` hook.
 
 ---
 
@@ -47,8 +47,8 @@ Thread B: charges on stale data — double charge
 **Vanilla aasm** with default settings lets you write the state column directly, skipping guards, callbacks, and audit logging:
 
 ```ruby
-payment.status = 'paid'          # no guards, no callbacks, no log
-payment.update!(status: 'paid')  # same — routes through the setter
+record.status = 'approved'          # no guards, no callbacks, no log
+record.update!(status: 'approved')  # same — routes through the setter
 ```
 
 **This fork** enables `no_direct_assignment` by default. Both vectors above raise `AASM::NoDirectAssignmentError`.
@@ -59,16 +59,16 @@ payment.update!(status: 'paid')  # same — routes through the setter
 
 ### 4. `after_commit` fires inside a savepoint (fires on rollback)
 
-**Vanilla aasm** fires `after_commit` at SAVEPOINT release, not at the outermost `COMMIT`. If the outer transaction rolls back — a common pattern with nested transactions or `transaction { ... rollback! }` — the callback already ran.
+**Vanilla aasm** fires `after_commit` at SAVEPOINT release, not at the outermost `COMMIT`. If the outer transaction rolls back — a common pattern with nested transactions — the callback already ran.
 
 ```ruby
-event :ship do
-  after_commit { ShippingAPI.notify(self) }  # fires on SAVEPOINT release
+event :activate do
+  after_commit { ExternalAPI.provision(self) }  # fires on SAVEPOINT release
 end
 
 ActiveRecord::Base.transaction do
-  order.ship!          # after_commit fires here (inside the outer transaction)
-  raise "oh no"        # outer transaction rolls back — but the notification is gone
+  service.activate!    # after_commit fires here (inside the outer transaction)
+  raise "rollback"     # outer transaction rolls back — but the API call is gone
 end
 ```
 
@@ -94,34 +94,34 @@ Every successful persisted transition writes a row to `{Model}Transition` **insi
 
 ### Convention
 
-Define a `PaymentTransition` model:
+Define a `JobTransition` model:
 
 ```ruby
-class PaymentTransition < ApplicationRecord
-  belongs_to :payment
+class JobTransition < ApplicationRecord
+  belongs_to :job
 end
 ```
 
 With this migration:
 
 ```ruby
-create_table :payment_transitions do |t|
-  t.integer :payment_id, null: false
+create_table :job_transitions do |t|
+  t.integer :job_id,     null: false
   t.string  :from_state, null: false
   t.string  :to_state,   null: false
   t.string  :event,      null: false
   t.timestamps
-  t.index :payment_id
+  t.index :job_id
 end
 ```
 
-That is all. No configuration. The fork detects `PaymentTransition` by convention and writes to it automatically.
+That is all. No configuration. The fork detects `JobTransition` by convention and writes to it automatically.
 
 If the transition class does not exist, the fork logs one `warn` per model class and continues — no error, no silent failure.
 
 ### Namespaced models
 
-`Billing::Invoice` tries `Billing::InvoiceTransition` first, then `InvoiceTransition`. The foreign key is `invoice_id` (demodulized), not `billing_invoice_id`.
+`Ops::Request` tries `Ops::RequestTransition` first, then `RequestTransition`. The foreign key is `request_id` (demodulized), not `ops_request_id`.
 
 ---
 
@@ -133,11 +133,11 @@ Sometimes the state machine is the problem: a bug left records in an impossible 
 
 ```ruby
 # Rails console — production incident recovery
-Payment.where(id: bad_ids).update_all(status: 'pending')
-payment.update_columns(status: 'pending')
+Job.where(id: stuck_ids).update_all(status: 'pending')
+job.update_columns(status: 'pending')
 ```
 
-This bypasses all AASM machinery by design. The setter override only protects against accidental code-level assignment, not deliberate operator intervention.
+This bypasses all AASM machinery by design. The setter override only protects against accidental code-level assignment, not deliberate operator intervention. A guardrail that prevents recovery is a trap.
 
 ### Seeding state in tests
 
@@ -164,44 +164,59 @@ Everything else (`whiny_transitions`, `use_transactions`, `requires_lock`, etc.)
 
 ---
 
-## Why state machine bugs cause enterprise-level incidents
+## Why does this keep happening? Root cause analysis
 
-State machines in production systems are not just code organization — they are the enforcement boundary for business rules. When they break, the failures compound:
+These are not obscure edge cases. They appear in major open-source projects and production systems alike. The root causes explain why the upstream library didn't catch them — and why similar bugs are likely in any state machine library you pick up.
 
-### The double-charge problem
+### 1. In-memory-first design
 
-Guard race conditions directly produce double charges. The guard passes on stale data in two concurrent threads; both transitions commit. This is not hypothetical — it is one of the most common sources of financial reconciliation bugs in Rails apps at scale. Every payment processor, booking system, and subscription service has hit this.
+State machines were originally designed for in-process systems — embedded firmware, UI event loops, protocol parsers. In those contexts, "state" is a single-process concept and the guard `if (balance > 0)` reads a local variable. The correctness assumption is that the state machine *is* the canonical source of truth.
 
-**Resources:**
-- [Race Conditions on Rails](https://blog.appsignal.com/2022/01/12/how-to-deal-with-race-conditions-in-ruby-on-rails.html) — AppSignal
-- [Pessimistic Locking in ActiveRecord](https://api.rubyonrails.org/classes/ActiveRecord/Locking/Pessimistic.html) — Rails docs
-- [Stripe's approach to idempotency](https://stripe.com/blog/idempotency) — how Stripe prevents double charges at the API layer; the problem this addresses starts at the state machine layer
+Rails models are wrappers over a shared database. Two instances of the same Ruby object can exist in different processes with different in-memory values for the same row. A state machine that reads its guard data from `self.balance` without reloading is applying a correctness model that is fundamentally wrong for a shared-database environment.
 
-### The phantom notification problem
+The upstream library acknowledged this with `requires_lock` configuration, but made it opt-in. The correct default is reload-then-lock.
 
-`after_commit` firing inside a savepoint means webhook calls, emails, and downstream API requests go out for transactions that ultimately roll back. The canonical incident: an order confirmation email is sent, the payment transaction rolls back, the customer has a confirmation for an order that doesn't exist.
+### 2. Breaking-change aversion
 
-**Resources:**
-- [after_commit_everywhere README](https://github.com/Envek/after_commit_everywhere) — explains the SAVEPOINT problem concisely
-- [Rails `after_commit` and nested transactions](https://guides.rubyonrails.org/active_record_callbacks.html#transaction-callbacks) — Rails docs on the behaviour
-- [The problem with after_commit in Rails](https://www.honeybadger.io/blog/rails-callbacks/) — Honeybadger engineering
+`no_direct_assignment: false` was the original default. Changing it to `true` breaks apps that relied (usually accidentally) on direct assignment. The upstream project is conservative about defaults precisely because millions of apps depend on it. What is a correctness fix for new users is a breaking change for existing users.
 
-### The audit gap problem
+This fork takes the position that the correct behaviour should be the default, and that opting *out* of protection is the deliberate act.
 
-State changes without a corresponding audit row create compliance failures. In financial services, healthcare, and legal tech, every state transition is a business event that regulators may require you to prove happened in a specific sequence. An audit table that can get out of sync with the state column (because the writes aren't atomic) is not a real audit trail.
+### 3. Opt-in safety vs opt-out safety
 
-**Resources:**
-- [Event Sourcing](https://martinfowler.com/eaaDev/EventSourcing.html) — Fowler; the audit trail pattern taken to its logical conclusion
-- [Database Internals, Chapter 5](https://www.oreilly.com/library/view/database-internals/9781492040330/) — Petrov; transaction isolation levels and what "atomic" actually means at the DB layer
-- [ACID compliance in practice](https://www.cockroachlabs.com/blog/acid-rain/) — CockroachDB blog; a readable explanation of what breaks when ACID guarantees are violated
+"Opt-in safety" means the safe behaviour requires configuration. Most developers use the defaults. Most apps are therefore running with the unsafe behaviour.
 
-### The silent bypass problem
+The before-hook ordering is the clearest example. The intuitive reading of:
+```ruby
+event :submit do
+  before { send_notification }
+  transitions from: :draft, to: :approved, guard: :ready?
+end
+```
+is that the notification fires when the transition fires. But vanilla aasm separates "callbacks" from "guards" in its internal execution model, and runs callbacks before checking guards. The developer has to know to read the source to understand this.
 
-Direct state column writes that skip the state machine produce records in states that are technically impossible by the machine's definition. Downstream code that trusts the state column — billing jobs, reporting queries, compliance checks — then runs against invalid data. The failure is not at the point of the bad write; it surfaces later, in a different system, in a way that is hard to trace back.
+### 4. Savepoint vs transaction confusion
 
-**Resources:**
-- [Designing Data-Intensive Applications, Chapter 7](https://dataintensive.net/) — Kleppmann; transactions, isolation, and what "the database is the source of truth" actually requires
-- [The dangers of implicit state](https://thoughtbot.com/blog/state-machines-and-the-open-closed-principle) — thoughtbot; state machines as a design boundary
+ActiveRecord wraps every `save` in its own transaction. When you call `save` inside an explicit `transaction {}` block, the inner `save` becomes a SAVEPOINT. `after_commit` on a SAVEPOINT fires when the SAVEPOINT is released — not when the outer transaction commits.
+
+The upstream library's `after_commit` simulation reads the documentation ("fires after commit") but implements the behaviour incorrectly ("fires after savepoint release"). This distinction is invisible in development — which has auto-commit semantics for each statement — and only surfaces in production code that wraps multiple operations in an explicit transaction.
+
+The [`after_commit_everywhere`](https://github.com/Envek/after_commit_everywhere) gem exists specifically because this pattern is hard to get right from userland. Using it is the correct fix.
+
+---
+
+## Real incidents where these bugs caused production failures
+
+The bugs fixed in this fork are not theoretical. Here are documented incidents in widely-deployed open-source projects:
+
+| Project | Bug | Impact |
+|---|---|---|
+| **Drupal** ([#3181439](https://www.drupal.org/project/drupal/issues/3181439)) | Content Moderation module runs transition hooks before checking access guards | Published content visible to users before moderation approval; hooks fire on rejected transitions |
+| **nopCommerce** ([CVE-2024-58248](https://nvd.nist.gov/vuln/detail/CVE-2024-58248)) | Gift card state guard evaluated against stale session state | Race condition allows gift card balance to be consumed more than once |
+| **Spree Commerce** ([mass assignment era](https://guides.spreecommerce.org/security/)) | State column writable via mass assignment before `attr_accessible` enforcement | Order status overrideable via crafted POST parameters; fulfilled orders marked pending |
+| **Rails** ([#52641](https://github.com/rails/rails/issues/52641)) | `after_commit` inside nested transactions fires at SAVEPOINT release | Callbacks run on data that is subsequently rolled back; duplicate emails, premature webhooks |
+
+The pattern across all four: a state machine is used to enforce a business invariant, the library has an unsafe default, and the failure surfaces in a different system (a moderation queue, a billing reconciliation, an order fulfillment pipeline) days or weeks after the bad write.
 
 ---
 
@@ -209,11 +224,12 @@ Direct state column writes that skip the state machine produce records in states
 
 | Topic | Resource |
 |---|---|
-| State machine theory | [Designing State Machines](https://statecharts.dev/) — XState docs; good mental model for anyone building state machines |
-| Rails transaction safety | [How Rails handles transactions](https://api.rubyonrails.org/classes/ActiveRecord/Transactions/ClassMethods.html) |
-| Locking strategies | [Optimistic vs Pessimistic Locking](https://www.martinfowler.com/eaaCatalog/optimisticOfflineLock.html) — Fowler |
-| Financial correctness | [Double-entry bookkeeping](https://en.wikipedia.org/wiki/Double-entry_bookkeeping) — the 500-year-old solution to the same problem |
-| Distributed systems | [Designing Distributed Systems](https://www.oreilly.com/library/view/designing-distributed-systems/9781491983638/) — Burns; Chapter 3 covers coordination patterns relevant to multi-service state |
+| State machine theory | [Statecharts](https://statecharts.dev/) — good mental model; covers guard ordering and action timing |
+| Rails transaction safety | [ActiveRecord Transactions](https://api.rubyonrails.org/classes/ActiveRecord/Transactions/ClassMethods.html) — official docs on savepoints and `after_commit` |
+| The savepoint problem | [after_commit_everywhere](https://github.com/Envek/after_commit_everywhere) — explains the SAVEPOINT/COMMIT distinction concisely |
+| Locking strategies | [Optimistic vs Pessimistic Locking](https://www.martinfowler.com/eaaCatalog/optimisticOfflineLock.html) — Fowler; relevant to guard freshness |
+| Race conditions in Rails | [Race Conditions on Rails](https://blog.appsignal.com/2022/01/12/how-to-deal-with-race-conditions-in-ruby-on-rails.html) — AppSignal; practical examples |
+| Distributed state | [Designing Distributed Systems](https://www.oreilly.com/library/view/designing-distributed-systems/9781491983638/) — Burns; Chapter 3 on coordination |
 
 ---
 

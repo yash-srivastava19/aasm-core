@@ -3,10 +3,10 @@
 #
 # Usage:
 #
-#   RSpec.describe Payment do
+#   RSpec.describe Job do
 #     it_behaves_like "a robust state machine",
-#       factory:     -> { Payment.create!(amount_cents: 1000) },
-#       valid_event: :pay,
+#       factory:     -> { Job.create!(work_units: 1000) },
+#       valid_event: :complete,
 #       bad_state:   'hacked'
 #   end
 
@@ -25,10 +25,9 @@ RSpec.shared_examples "a robust state machine" do |factory:, valid_event:, bad_s
       .to raise_error(ActiveRecord::RecordInvalid)
   end
 
-  it "prevents update_columns from bypassing the state machine" do
+  it "allows update_columns as an operator escape hatch" do
     col = record.class.aasm.attribute_name.to_s
-    expect { record.update_columns(col => bad_state) }
-      .to raise_error(RuntimeError)
+    expect { record.update_columns(col => bad_state) }.not_to raise_error
   end
 
   it "writes a transition record on a successful event" do
@@ -39,7 +38,7 @@ RSpec.shared_examples "a robust state machine" do |factory:, valid_event:, bad_s
 
   it "does not fire after_commit if an outer transaction rolls back" do
     fired = false
-    probe_attr = :"on_#{valid_event}_probe"
+    probe_attr = :"on_#{valid_event}ed_probe"
     record.class.public_send(:"#{probe_attr}=", ->(_) { fired = true }) rescue nil
 
     ActiveRecord::Base.transaction do
@@ -52,7 +51,7 @@ RSpec.shared_examples "a robust state machine" do |factory:, valid_event:, bad_s
 
   it "does not fire after_commit inside an outer transaction" do
     sequence = []
-    probe_attr = :"on_#{valid_event}_probe"
+    probe_attr = :"on_#{valid_event}ed_probe"
     record.class.public_send(:"#{probe_attr}=", ->(_) { sequence << :callback }) rescue nil
 
     ActiveRecord::Base.transaction do

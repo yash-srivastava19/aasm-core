@@ -2,42 +2,42 @@
 #
 # Bug 1 — Foreign key:
 #   self.class.name.underscore + "_id"
-#   "Billing::Invoice".underscore  →  "billing/invoice"  →  "billing/invoice_id"
-#   The column does not exist.  The correct form is "invoice_id".
+#   "Ops::Request".underscore  →  "ops/request"  →  "ops/request_id"
+#   The column does not exist.  The correct form is "request_id".
 #
 # Bug 2 — Constant lookup (minor, works for same-namespace classes but
 #   silently misses top-level classes):
-#   "#{self.class.name}Transition"  →  "Billing::InvoiceTransition"
+#   "#{self.class.name}Transition"  →  "Ops::RequestTransition"
 #   This works IF the transition class is namespaced identically.
-#   Fails silently if the dev defined top-level InvoiceTransition instead.
+#   Fails silently if the dev defined top-level RequestTransition instead.
 #
-# Fix: use self.class.model_name.singular for the FK (Rails strips namespace),
+# Fix: use self.class.name.demodulize.underscore for the FK (strips namespace),
 # and fall back to demodulized constant name so both conventions work.
 
 # ── Namespaced models defined inline ─────────────────────────────────────────
 
-module Billing
-  class InvoiceTransition < ActiveRecord::Base
-    self.table_name = 'billing_invoice_transitions'
-    belongs_to :invoice, class_name: 'Billing::Invoice'
+module Ops
+  class RequestTransition < ActiveRecord::Base
+    self.table_name = 'ops_request_transitions'
+    belongs_to :request, class_name: 'Ops::Request'
   end
 
-  class Invoice < ActiveRecord::Base
-    self.table_name = 'billing_invoices'
+  class Request < ActiveRecord::Base
+    self.table_name = 'ops_requests'
 
     include AASM
 
     aasm column: :status do
-      state :draft,    initial: true
+      state :open,     initial: true
       state :approved
       state :rejected
 
       event :approve do
-        transitions from: :draft, to: :approved
+        transitions from: :open, to: :approved
       end
 
       event :reject do
-        transitions from: :draft, to: :rejected
+        transitions from: :open, to: :rejected
       end
     end
   end
@@ -46,21 +46,21 @@ end
 # ── Specs ─────────────────────────────────────────────────────────────────────
 
 RSpec.describe "Unhappy path: namespaced models" do
-  subject(:invoice) { Billing::Invoice.create!(amount_cents: 500) }
+  subject(:request) { Ops::Request.create!(priority: 1) }
 
-  before { Billing::InvoiceTransition.delete_all }
+  before { Ops::RequestTransition.delete_all }
 
   # ── Bypass protection must still work under namespacing ─────────────────
 
   describe "bypass prevention" do
     it "raises on direct state assignment" do
-      expect { invoice.status = 'approved' }
+      expect { request.status = 'approved' }
         .to raise_error(AASM::NoDirectAssignmentError)
     end
 
     it "allows update_columns as an escape hatch (does not raise)" do
-      expect { invoice.update_columns(status: 'approved') }.not_to raise_error
-      expect(invoice.reload.status).to eq('approved')
+      expect { request.update_columns(status: 'approved') }.not_to raise_error
+      expect(request.reload.status).to eq('approved')
     end
   end
 
@@ -68,34 +68,34 @@ RSpec.describe "Unhappy path: namespaced models" do
 
   describe "audit trail" do
     it "creates a transition record on a successful event" do
-      expect { invoice.approve! }
-        .to change { Billing::InvoiceTransition.count }.by(1)
+      expect { request.approve! }
+        .to change { Ops::RequestTransition.count }.by(1)
     end
 
-    it "stores the correct foreign key (invoice_id, not billing/invoice_id)" do
-      invoice.approve!
+    it "stores the correct foreign key (request_id, not ops/request_id)" do
+      request.approve!
 
-      t = Billing::InvoiceTransition.last
-      expect(t.invoice_id).to eq(invoice.id),
+      t = Ops::RequestTransition.last
+      expect(t.request_id).to eq(request.id),
         "FK is wrong — likely stored as nil because the column name was " \
-        "derived from 'Billing::Invoice'.underscore → 'billing/invoice_id', " \
-        "which doesn't exist. Fix: use model_name.singular."
+        "derived from 'Ops::Request'.underscore → 'ops/request_id', " \
+        "which doesn't exist. Fix: use demodulize.underscore."
     end
 
     it "records correct from_state, to_state, and event" do
-      invoice.approve!
+      request.approve!
 
-      t = Billing::InvoiceTransition.last
-      expect(t.from_state).to eq('draft')
+      t = Ops::RequestTransition.last
+      expect(t.from_state).to eq('open')
       expect(t.to_state).to  eq('approved')
       expect(t.event).to     eq('approve')
     end
 
     it "does not create a record when the transition is invalid" do
-      invoice.approve!
+      request.approve!
 
-      expect { invoice.approve! rescue nil }
-        .not_to change { Billing::InvoiceTransition.count }
+      expect { request.approve! rescue nil }
+        .not_to change { Ops::RequestTransition.count }
     end
   end
 
@@ -103,13 +103,13 @@ RSpec.describe "Unhappy path: namespaced models" do
 
   describe "transitions" do
     it "follows the full lifecycle" do
-      invoice.approve!
-      expect(invoice.status).to eq('approved')
+      request.approve!
+      expect(request.status).to eq('approved')
     end
 
     it "raises on invalid transition" do
-      invoice.approve!
-      expect { invoice.reject! }.to raise_error(AASM::InvalidTransition)
+      request.approve!
+      expect { request.reject! }.to raise_error(AASM::InvalidTransition)
     end
   end
 end

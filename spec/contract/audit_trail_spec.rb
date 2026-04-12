@@ -2,8 +2,8 @@
 #
 # Borrowed from Statesman's core insight: the transition LOG is the source of
 # truth, not just the status column.  Every successful transition writes one
-# row to payment_transitions in the SAME database transaction as the state
-# column update.  They are atomic — you never get one without the other.
+# row to job_transitions in the SAME database transaction as the state column
+# update.  They are atomic — you never get one without the other.
 #
 # This gives you:
 #   - a full audit trail for free (no extra effort from the developer)
@@ -11,35 +11,35 @@
 #   - a queryable history for compliance, debugging, and support
 
 RSpec.describe "Contract: audit trail" do
-  subject(:payment) { Payment.create!(amount_cents: 1000) }
+  subject(:job) { Job.create!(work_units: 1000) }
 
   # ── A record is written on every successful transition ───────────────────
 
   describe "transition record creation" do
-    it "creates one PaymentTransition per successful event" do
-      expect { payment.pay! }
-        .to change { PaymentTransition.count }.by(1)
+    it "creates one JobTransition per successful event" do
+      expect { job.complete! }
+        .to change { JobTransition.count }.by(1)
     end
 
     it "records the correct from_state, to_state, and event name" do
-      payment.pay!
-      t = PaymentTransition.last
+      job.complete!
+      t = JobTransition.last
 
       expect(t.from_state).to eq('pending')
-      expect(t.to_state).to  eq('paid')
-      expect(t.event).to     eq('pay')
+      expect(t.to_state).to  eq('completed')
+      expect(t.event).to     eq('complete')
     end
 
     it "records a timestamp" do
       freeze = Time.now
-      payment.pay!
+      job.complete!
 
-      expect(PaymentTransition.last.created_at).to be_within(2).of(freeze)
+      expect(JobTransition.last.created_at).to be_within(2).of(freeze)
     end
 
     it "records the parent FK so history is queryable per record" do
-      payment.pay!
-      expect(PaymentTransition.last.payment_id).to eq(payment.id)
+      job.complete!
+      expect(JobTransition.last.job_id).to eq(job.id)
     end
   end
 
@@ -47,39 +47,39 @@ RSpec.describe "Contract: audit trail" do
 
   describe "atomicity with the state column" do
     it "does NOT write a transition record when a guard fails" do
-      payment.update_columns(amount_cents: 0)   # bypass for setup only
+      job.update_columns(work_units: 0)   # bypass for setup only
 
-      expect { payment.pay! rescue nil }
-        .not_to change { PaymentTransition.count }
+      expect { job.complete! rescue nil }
+        .not_to change { JobTransition.count }
     end
 
     it "does NOT write a transition record when the transition is invalid" do
-      payment.fail!   # move to :failed first
+      job.fail!   # move to :failed first
 
-      expect { payment.pay! rescue nil }
-        .not_to change { PaymentTransition.count }
+      expect { job.complete! rescue nil }
+        .not_to change { JobTransition.count }
     end
 
     it "does NOT write a transition record when the before hook raises" do
-      Payment.before_pay_probe = ->(_) { raise "payment gateway timeout" }
+      Job.before_complete_probe = ->(_) { raise "upstream dependency unavailable" }
 
-      expect { payment.pay! rescue nil }
-        .not_to change { PaymentTransition.count }
+      expect { job.complete! rescue nil }
+        .not_to change { JobTransition.count }
 
-      expect(payment.reload.status).to eq('pending')
+      expect(job.reload.status).to eq('pending')
     end
 
     it "rolls back the transition record if the outer transaction rolls back" do
-      payment  # create the record BEFORE the outer transaction
+      job  # create the record BEFORE the outer transaction
       ActiveRecord::Base.transaction do
-        payment.pay!
-        expect(PaymentTransition.count).to eq(1)   # written inside the tx
+        job.complete!
+        expect(JobTransition.count).to eq(1)   # written inside the tx
         raise ActiveRecord::Rollback
       end
 
       # Both the state column AND the log entry must be rolled back
-      expect(PaymentTransition.count).to eq(0)
-      expect(payment.reload.status).to eq('pending')
+      expect(JobTransition.count).to eq(0)
+      expect(job.reload.status).to eq('pending')
     end
   end
 
@@ -87,25 +87,25 @@ RSpec.describe "Contract: audit trail" do
 
   describe "full lifecycle history" do
     it "appends one record per transition, in order" do
-      payment.pay!
-      payment.refund!
+      job.complete!
+      job.cancel!
 
-      history = PaymentTransition
-                  .where(payment_id: payment.id)
+      history = JobTransition
+                  .where(job_id: job.id)
                   .order(:created_at)
 
-      expect(history.map(&:to_state)).to eq(%w[paid refunded])
+      expect(history.map(&:to_state)).to eq(%w[completed cancelled])
     end
 
     it "never updates or deletes existing records — append only" do
-      payment.pay!
-      first_id = PaymentTransition.last.id
+      job.complete!
+      first_id = JobTransition.last.id
 
-      payment.refund!
+      job.cancel!
 
       # The original record must be untouched
-      expect(PaymentTransition.find(first_id).to_state).to eq('paid')
-      expect(PaymentTransition.count).to eq(2)
+      expect(JobTransition.find(first_id).to_state).to eq('completed')
+      expect(JobTransition.count).to eq(2)
     end
   end
 end
