@@ -31,8 +31,17 @@ module AASM
 
         # Reload from the DB before evaluating guards so they always see the
         # current row, not whatever happens to be in Ruby's memory.
-        # For production race-condition safety, pair with requires_lock: 'FOR UPDATE NOWAIT'
-        # in the aasm config — that is the locking guarantee; this is the freshness guarantee.
+        #
+        # SIDE EFFECT: this discards any unsaved in-memory attribute changes
+        # the caller made before invoking the event.  Callers who need to
+        # mutate attributes atomically with the transition should either:
+        #   a) save! the record before calling the event, or
+        #   b) perform the mutation inside an AASM before-hook.
+        #
+        # For production race-condition safety, pair with:
+        #   requires_lock: 'FOR UPDATE NOWAIT' in the aasm config block.
+        # That is the pessimistic locking guarantee; this reload is the
+        # freshness guarantee.  They solve different problems.
         reload if persisted? && options[:persist]
 
         event     = self.class.aasm(state_machine_name).state_machine.events[event_name]
