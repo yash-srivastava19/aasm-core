@@ -6,15 +6,8 @@ class PaymentTransition < ActiveRecord::Base
 end
 
 # ── Payment ───────────────────────────────────────────────────────────────────
-# This is vanilla AASM today.
-# Once we build the gem, the single line below gets uncommented:
-#
-#   include AASM::Core
-#
-# Every contract spec below will then pass.
 class Payment < ActiveRecord::Base
   include AASM
-  include AASM::Core
 
   # Test probes — set in specs, cleared in before(:each)
   cattr_accessor :on_paid_probe
