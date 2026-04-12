@@ -1,4 +1,5 @@
 require 'aasm/persistence/orm'
+require 'after_commit_everywhere'
 module AASM
   module Persistence
     module ActiveRecordPersistence
@@ -42,9 +43,8 @@ module AASM
       module ClassMethods
         # Returns all state column name strings for this model across all machines.
         def aasm_state_column_names
-          AASM::StateMachineStore.fetch(self, true).machine_names.map do |name|
-            AASM::StateMachineStore.fetch(self, true).machine(name).config.column.to_s
-          end
+          store = AASM::StateMachineStore.fetch(self, true)
+          store.machine_names.map { |name| store.machine(name).config.column.to_s }
         end
 
         def aasm_create_scope(state_machine_name, scope_name)
@@ -69,21 +69,8 @@ module AASM
         private
 
         def aasm_execute_after_commit
-          begin
-            require 'after_commit_everywhere'
-            raise LoadError unless Gem::Version.new(::AfterCommitEverywhere::VERSION) >= Gem::Version.new('0.1.5')
-
-            self.extend ::AfterCommitEverywhere
-            after_commit do
-              yield
-            end
-          rescue LoadError
-            warn <<-MSG
-  [DEPRECATION] :after_commit AASM callback is not safe in terms of race conditions and redundant calls.
-                Please add `gem 'after_commit_everywhere', '~> 1.0'` to your Gemfile in order to fix that.
-            MSG
-            yield
-          end
+          self.extend ::AfterCommitEverywhere
+          after_commit { yield }
         end
 
         def aasm_raise_invalid_record

@@ -95,49 +95,47 @@ private
   end
 
   def aasm_fire_event(state_machine_name, event_name, options, *args, &block)
-    event = self.class.aasm(state_machine_name).state_machine.events[event_name]
-
-    # Save caller's context so nested events (e.g. a before-hook that fires
-    # another event) restore correctly — SAVE/RESTORE, not RESET-TO-NIL.
+    event         = self.class.aasm(state_machine_name).state_machine.events[event_name]
+    instance_base = aasm(state_machine_name)
+    # Compute once — current_state doesn't change mid-method, and process_args
+    # iterates transitions on every call (O(n) per state machine).
+    processed_args = process_args(event, instance_base.current_state, *args)
+    # Save caller's context so nested events restore correctly — SAVE/RESTORE,
+    # not RESET-TO-NIL.
     prev_event = Thread.current[:aasm_current_event]
 
     begin
-      old_state = aasm(state_machine_name).state_object_for_name(aasm(state_machine_name).current_state)
+      old_state = instance_base.state_object_for_name(instance_base.current_state)
 
-      # Guards run BEFORE before-hooks.  A failed guard must never trigger
+      # Guards run BEFORE before-hooks — a failed guard must never trigger
       # side effects (fee deductions, emails, etc.).
       unless may_fire_to = event.may_fire?(self, *args)
         if options[:persist]
-          # Bang method — delegate to AASM's failure handler (respects whiny_transitions)
           return aasm_failed(state_machine_name, event_name, old_state, event.failed_callbacks)
         else
-          # Non-bang method — always return false cleanly, never raise
           return false
         end
       end
 
-      # Record the event name for the audit logger (TransitionLogger reads
-      # Thread.current[:aasm_current_event] inside aasm_write_state).
+      # Record event name for the audit logger (read in aasm_write_state).
       Thread.current[:aasm_current_event] = event_name
 
-      fire_default_callbacks(event, *process_args(event, aasm(state_machine_name).current_state, *args))
+      fire_default_callbacks(event, *processed_args)
+      fire_exit_callbacks(old_state, *processed_args)
 
-      fire_exit_callbacks(old_state, *process_args(event, aasm(state_machine_name).current_state, *args))
       if new_state_name = event.fire(self, {:may_fire => may_fire_to}, *args)
         aasm_fired(state_machine_name, event, old_state, new_state_name, options, *args, &block)
       else
         aasm_failed(state_machine_name, event_name, old_state, event.failed_callbacks)
       end
     rescue StandardError => e
-      event.fire_callbacks(:error, self, e, *process_args(event, aasm(state_machine_name).current_state, *args)) ||
-      event.fire_global_callbacks(:error_on_all_events, self, e, *process_args(event, aasm(state_machine_name).current_state, *args)) ||
+      event.fire_callbacks(:error, self, e, *processed_args) ||
+      event.fire_global_callbacks(:error_on_all_events, self, e, *processed_args) ||
       raise(e)
       false
     ensure
-      event.fire_callbacks(:ensure, self, *process_args(event, aasm(state_machine_name).current_state, *args))
-      event.fire_global_callbacks(:ensure_on_all_events, self, *process_args(event, aasm(state_machine_name).current_state, *args))
-      # Restore, not reset — preserves the outer event's context during
-      # re-entrant callbacks.
+      event.fire_callbacks(:ensure, self, *processed_args)
+      event.fire_global_callbacks(:ensure_on_all_events, self, *processed_args)
       Thread.current[:aasm_current_event] = prev_event
     end
   end
