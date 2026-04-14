@@ -73,17 +73,30 @@ module AASM
       #   job.aasm_has_transitioned_to?(:failed, :timeout)
       #
       # Returns false when no transition class is defined for the model.
+      #
+      # Performance: add a covering index on (fk_col, to_state) for efficient
+      # lookups, e.g. add_index :job_transitions, [:job_id, :to_state].
       def aasm_has_transitioned_to?(target_state, event_name = nil)
         klass = aasm_transition_log_class
         return false unless klass
 
-        fk    = "#{self.class.name.demodulize.underscore}_id"
-        query = klass.where(fk => id, to_state: target_state.to_s)
+        query = klass.where(aasm_fk_column_name => id, to_state: target_state.to_s)
         query = query.where(event: event_name.to_s) if event_name
         query.exists?
       end
 
       private
+
+      # Returns the transition table foreign key column name for this model,
+      # e.g. "job_id" for Job, "request_id" for Ops::Request.
+      # Memoized at the class level — computed once per model class.
+      def aasm_fk_column_name
+        self.class.instance_variable_get(:@_aasm_fk_column_name) ||
+          self.class.instance_variable_set(
+            :@_aasm_fk_column_name,
+            "#{self.class.name.demodulize.underscore}_id"
+          )
+      end
 
       # Save the record and return true if it succeeded/false otherwise.
       def aasm_save
