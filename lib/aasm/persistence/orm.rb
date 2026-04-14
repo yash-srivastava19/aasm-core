@@ -85,6 +85,20 @@ module AASM
         query.exists?
       end
 
+      # Override this in your model to attach arbitrary context to each
+      # transition log entry.  The returned hash is serialised as JSON and
+      # stored in the transition table's +metadata+ column (only written when
+      # the column exists, so existing schemas without it are unaffected).
+      #
+      #   def aasm_transition_metadata(from_state, to_state, event_name)
+      #     { performed_by: Current.user&.id, ip: Current.request_ip }
+      #   end
+      #
+      # Must return a hash.  Returns {} by default (no metadata written).
+      def aasm_transition_metadata(_from_state, _to_state, _event_name)
+        {}
+      end
+
       private
 
       # Returns the transition table foreign key column name for this model,
@@ -142,12 +156,21 @@ module AASM
         klass = aasm_transition_log_class
         return unless klass
 
-        klass.create!(
+        event_name = Thread.current[:aasm_current_event]
+
+        attrs = {
           "#{self.class.name.demodulize.underscore}_id" => id,
           from_state: from_state.to_s,
           to_state:   to_state.to_s,
-          event:      Thread.current[:aasm_current_event].to_s
-        )
+          event:      event_name.to_s
+        }
+
+        metadata = aasm_transition_metadata(from_state, to_state, event_name)
+        if metadata.any? && klass.column_names.include?('metadata')
+          attrs[:metadata] = metadata.to_json
+        end
+
+        klass.create!(attrs)
       end
 
       # Resolve the {Model}Transition class, memoized at the class level.
