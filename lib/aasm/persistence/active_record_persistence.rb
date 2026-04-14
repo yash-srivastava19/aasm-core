@@ -83,22 +83,22 @@ module AASM
 
         def aasm_update_column(attribute_name, value)
           if self.class.locking_enabled?
-            # Respect optimistic locking: include lock_version in the WHERE
-            # clause and increment it on success.  update_all bypasses AR's
-            # locking machinery, so we must enforce it manually.
+            # update_all bypasses AR's locking machinery, so we enforce the
+            # compare-and-swap manually using lock_version in the WHERE clause.
             locking_col  = self.class.locking_column
             current_lock = self[locking_col].to_i
+            next_lock    = current_lock + 1
 
             affected = self.class.unscoped.where(
               self.class.primary_key => self.id,
               locking_col            => current_lock
-            ).update_all(attribute_name => value, locking_col => current_lock + 1)
+            ).update_all(attribute_name => value, locking_col => next_lock)
 
             if affected == 1
-              self[locking_col] = current_lock + 1
+              self[locking_col] = next_lock
               true
             else
-              raise ActiveRecord::StaleObjectError.new(self, 'aasm_update_column')
+              raise ActiveRecord::StaleObjectError.new(self, 'save')
             end
           else
             self.class.unscoped.where(self.class.primary_key => self.id).update_all(attribute_name => value) == 1
