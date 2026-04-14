@@ -40,8 +40,6 @@ end
 # ── Specs ─────────────────────────────────────────────────────────────────────
 
 RSpec.describe "Contract: transition metadata hook" do
-  before { JobTransition.delete_all; Job.delete_all }
-
   # ── Default (no override) writes no metadata ─────────────────────────────
 
   describe "default behaviour" do

@@ -159,15 +159,17 @@ module AASM
         event_name = Thread.current[:aasm_current_event]
 
         attrs = {
-          "#{self.class.name.demodulize.underscore}_id" => id,
+          aasm_fk_column_name => id,
           from_state: from_state.to_s,
           to_state:   to_state.to_s,
           event:      event_name.to_s
         }
 
-        metadata = aasm_transition_metadata(from_state, to_state, event_name)
-        if metadata.any? && klass.column_names.include?('metadata')
-          attrs[:metadata] = metadata.to_json
+        # Check the column first (O(1) hash lookup, schema is constant) before
+        # calling the user hook, which may be non-trivial.
+        if klass.columns_hash.key?('metadata')
+          metadata = aasm_transition_metadata(from_state, to_state, event_name)
+          attrs[:metadata] = metadata.to_json unless metadata.empty?
         end
 
         klass.create!(attrs)
