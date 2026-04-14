@@ -55,6 +55,34 @@ module AASM
         aasm_write_state_attribute(state, name)
       end
 
+      # Returns true if this record has ever successfully transitioned to
+      # +target_state+.  Queries the transition log table, so the result
+      # reflects committed DB state — not in-memory state.
+      #
+      # Designed for idempotent event handling in async job processors:
+      #
+      #   def perform(job_id)
+      #     job = Job.find(job_id)
+      #     return if job.aasm_has_transitioned_to?(:completed)
+      #     job.complete!
+      #   end
+      #
+      # Pass +event_name+ to narrow the check to transitions triggered by a
+      # specific event (useful when multiple events can reach the same state):
+      #
+      #   job.aasm_has_transitioned_to?(:failed, :timeout)
+      #
+      # Returns false when no transition class is defined for the model.
+      def aasm_has_transitioned_to?(target_state, event_name = nil)
+        klass = aasm_transition_log_class
+        return false unless klass
+
+        fk    = "#{self.class.name.demodulize.underscore}_id"
+        query = klass.where(fk => id, to_state: target_state.to_s)
+        query = query.where(event: event_name.to_s) if event_name
+        query.exists?
+      end
+
       private
 
       # Save the record and return true if it succeeded/false otherwise.
